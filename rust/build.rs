@@ -29,6 +29,11 @@ fn sdk_path(sdk: &str) -> String {
 }
 
 fn main() {
+    // Emitting any rerun-if-changed turns off Cargo's default of rerunning the
+    // build script whenever any file in the package changes, so the crate's own
+    // sources have to be listed too: they are what cbindgen reads below, and
+    // without this a change to them leaves a stale zcashlc.h on disk.
+    println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=wrapper.c");
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-env-changed=TARGET");
@@ -97,11 +102,26 @@ fn main() {
     let headers_dir = PathBuf::from("target/Headers");
     fs::create_dir_all(&headers_dir).expect("create target/Headers failed");
 
-    if let Ok(b) = cbindgen::Builder::new()
-        .with_crate(crate_dir)
+    // Fail the build if codegen fails. Discarding the error left target/Headers
+    // empty, which `make xcframework` copies without warning.
+    let header = headers_dir.join("zcashlc.h");
+    cbindgen::Builder::new()
+        .with_crate(&crate_dir)
         .with_language(cbindgen::Language::C)
         .generate()
-    {
-        b.write_to_file(headers_dir.join("zcashlc.h"));
-    }
+        .unwrap_or_else(|e| panic!("cbindgen failed on {}: {}", crate_dir, e))
+        .write_to_file(&header);
+
+    // write_to_file returns false both when the contents are unchanged and when
+    // cbindgen had nothing to write, and either way it leaves whatever was
+    // already there alone, so check the file itself rather than the return
+    // value. Anything short of the declarations means the consumers get a
+    // header they cannot link against:
+    let written = fs::read_to_string(&header)
+        .unwrap_or_else(|e| panic!("cbindgen wrote no header at {}: {}", header.display(), e));
+    assert!(
+        written.contains("zcashlc_"),
+        "the header at {} declares none of the FFI, so cbindgen parsed nothing",
+        header.display()
+    );
 }
